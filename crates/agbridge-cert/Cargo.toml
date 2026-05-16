@@ -1,0 +1,18 @@
+[package]
+name = "agbridge-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Root CA + leaf certificate management for agbridge"
+
+[dependencies]
+rcgen.workspace = true
+x509-parser.workspace = true
+time = { version = "0.3", default-features = false, features = ["std"] }
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

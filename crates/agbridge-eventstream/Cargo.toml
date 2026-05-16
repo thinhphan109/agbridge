@@ -1,0 +1,16 @@
+[package]
+name = "agbridge-eventstream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AWS EventStream binary frame encoder for Kiro CodeWhisperer responses"
+
+[dependencies]
+bytes.workspace = true
+crc32fast.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "agbridge-trust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OS trust store installer for the agbridge Root CA"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
