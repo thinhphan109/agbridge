@@ -139,6 +139,8 @@ version = "0.1.0"
 dependencies = [
  "agbridge-config",
  "anyhow",
+ "libc",
+ "tokio",
  "tracing",
  "windows-service",
 ]

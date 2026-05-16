@@ -57,6 +57,9 @@ enum Cmd {
         #[command(subcommand)]
         action: ServiceCmd,
     },
+    /// Internal: launched by SCM. Do not call this directly.
+    #[command(hide = true)]
+    ScmRun,
 }
 
 #[derive(Subcommand)]
@@ -73,28 +76,53 @@ enum ServiceCmd {
     Status,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     agbridge_logging::init(&cli.log);
 
     let config_path = cli.config.unwrap_or_else(|| Config::default_path().expect("config path"));
 
-    match cli.cmd {
-        Cmd::Start { skip_setup, allow_remote } => start(&config_path, skip_setup, allow_remote).await,
-        Cmd::Stop => stop(&config_path),
-        Cmd::Setup => setup(&config_path),
-        Cmd::Cleanup { hard } => cleanup(&config_path, hard),
-        Cmd::Status => status(&config_path).await,
-        Cmd::Doctor => doctor(&config_path).await,
-        Cmd::ConfigShow => show_config(&config_path),
-        Cmd::ConfigSet { kv } => set_config(&config_path, kv),
-        Cmd::UninstallCert => { agbridge_trust::uninstall()?; Ok(()) }
-        Cmd::Service { action } => run_service(action),
+    // SCM dispatcher path runs **synchronously** because
+    // `service_dispatcher::start` blocks the calling thread until SCM exits.
+    #[cfg(windows)]
+    if matches!(cli.cmd, Cmd::ScmRun) {
+        let config_path_owned = config_path.clone();
+        return agbridge_service::service::run_dispatcher(move |notify| {
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            rt.block_on(async move {
+                start_with_notify(&config_path_owned, true, false, Some(notify)).await
+            })
+        });
     }
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        match cli.cmd {
+            Cmd::Start { skip_setup, allow_remote } => start(&config_path, skip_setup, allow_remote).await,
+            Cmd::Stop => stop(&config_path),
+            Cmd::Setup => setup(&config_path),
+            Cmd::Cleanup { hard } => cleanup(&config_path, hard),
+            Cmd::Status => status(&config_path).await,
+            Cmd::Doctor => doctor(&config_path).await,
+            Cmd::ConfigShow => show_config(&config_path),
+            Cmd::ConfigSet { kv } => set_config(&config_path, kv),
+            Cmd::UninstallCert => { agbridge_trust::uninstall()?; Ok(()) }
+            Cmd::Service { action } => run_service(action),
+            Cmd::ScmRun => Err(anyhow::anyhow!("scm-run is internal; use `agbridge service install` then `service start`")),
+        }
+    })
 }
 
 async fn start(config_path: &std::path::Path, skip_setup: bool, allow_remote: bool) -> Result<()> {
+    start_with_notify(config_path, skip_setup, allow_remote, None).await
+}
+
+async fn start_with_notify(
+    config_path: &std::path::Path,
+    skip_setup: bool,
+    allow_remote: bool,
+    scm_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> Result<()> {
     let config = load_or_init(config_path)?;
     if !allow_remote {
         ensure_loopback(&config.listen_addr).context(
@@ -116,11 +144,14 @@ async fn start(config_path: &std::path::Path, skip_setup: bool, allow_remote: bo
     let server = Server::new(config, cert)?;
 
     let server_fut = tokio::spawn(async move { server.run().await });
-    let shutdown = wait_for_shutdown();
     let result = tokio::select! {
         r = server_fut => r.unwrap_or_else(|e| Err(anyhow::anyhow!("join error: {e}"))),
-        _ = shutdown => {
+        _ = wait_for_shutdown() => {
             info!("shutdown signal received");
+            Ok(())
+        }
+        _ = wait_scm(scm_notify) => {
+            info!("SCM stop received");
             Ok(())
         }
     };
@@ -130,6 +161,14 @@ async fn start(config_path: &std::path::Path, skip_setup: bool, allow_remote: bo
     flush_dns_cache();
     remove_pid(&pid_path);
     result
+}
+
+async fn wait_scm(notify: Option<std::sync::Arc<tokio::sync::Notify>>) {
+    if let Some(n) = notify {
+        n.notified().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 #[cfg(windows)]
@@ -176,7 +215,7 @@ fn run_service(action: ServiceCmd) -> Result<()> {
     match action {
         ServiceCmd::Install => {
             let exe = std::env::current_exe().context("current_exe")?;
-            service::install(&exe, &["start", "--skip-setup"])
+            service::install(&exe, &["scm-run"])
         }
         ServiceCmd::Uninstall => service::uninstall(),
         ServiceCmd::Start => service::start(),

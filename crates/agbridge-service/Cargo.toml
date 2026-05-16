@@ -9,6 +9,10 @@ publish = false
 agbridge-config = { path = "../agbridge-config" }
 anyhow.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
