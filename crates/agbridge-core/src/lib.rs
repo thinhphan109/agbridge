@@ -2,7 +2,12 @@
 //!
 //! Listens on `config.listen_addr`, terminates TLS using a per-host leaf cert
 //! signed by the agbridge Root CA, then dispatches each request to the
-//! appropriate tool handler. Non-target hosts are passed through.
+//! appropriate tool handler. Non-target hosts and non-intercepted paths fall
+//! through to [`passthrough::Passthrough`] which forwards them unmodified to
+//! the real upstream (DNS bypass via Cloudflare).
+
+pub mod passthrough;
+use passthrough::Passthrough;
 
 use agbridge_cert::CertManager;
 use agbridge_config::Config;
@@ -28,15 +33,18 @@ pub struct Server {
     config: Arc<Config>,
     cert: CertManager,
     upstream: Upstream,
+    passthrough: Passthrough,
 }
 
 impl Server {
     pub fn new(config: Config, cert: CertManager) -> Result<Self> {
         let upstream = Upstream::new(&config.router_url, config.api_key.expose())?;
+        let passthrough = Passthrough::new()?;
         Ok(Self {
             config: Arc::new(config),
             cert,
             upstream,
+            passthrough,
         })
     }
 
@@ -58,7 +66,9 @@ impl Server {
             copilot: CopilotHandler { model_map: self.config.tools.copilot.model_map.clone() },
             kiro: KiroHandler { model_map: self.config.tools.kiro.model_map.clone() },
             cursor: CursorHandler,
+            cursor_enabled: self.config.tools.cursor.enabled,
             upstream: self.upstream.clone(),
+            passthrough: self.passthrough.clone(),
         });
 
         loop {
@@ -82,7 +92,9 @@ struct SharedState {
     copilot: CopilotHandler,
     kiro: KiroHandler,
     cursor: CursorHandler,
+    cursor_enabled: bool,
     upstream: Upstream,
+    passthrough: Passthrough,
 }
 
 async fn serve_conn(
@@ -118,22 +130,28 @@ async fn dispatch(
     debug!(%host, %url, "incoming");
 
     if url == "/_mitm_health" {
-        return Ok(json_response(200, br#"{"ok":true}"#));
+        return Ok(json_response(200, br#"{"ok":true,"agbridge":true}"#));
     }
 
-    let Some(tool) = agbridge_handlers::tool_for_host(&host) else {
-        return Ok(json_response(502, br#"{"error":"passthrough not implemented yet"}"#));
-    };
-
-    if !agbridge_handlers::is_intercepted_path(tool, &url) {
-        return Ok(json_response(502, br#"{"error":"path not intercepted; passthrough not implemented"}"#));
-    }
-
-    // Convert hyper Request to (HeaderMap, Bytes)
     let (parts, incoming) = req.into_parts();
     let body = incoming.collect().await?.to_bytes();
-    let headers_clone = parts.headers.clone();
-    let headers_h = parts.headers; // hyper::HeaderMap == http::HeaderMap
+    let headers_h = parts.headers.clone();
+    let method = parts.method.clone();
+    let uri = parts.uri.clone();
+
+    let pass = || async {
+        state.passthrough.forward(&host, method.clone(), uri.clone(), &headers_h, body.clone()).await
+    };
+
+    let Some(tool) = agbridge_handlers::tool_for_host(&host) else {
+        return pass().await;
+    };
+    if !agbridge_handlers::is_intercepted_path(tool, &url) {
+        return pass().await;
+    }
+    if matches!(tool, agbridge_handlers::Tool::Cursor) && !state.cursor_enabled {
+        return pass().await;
+    }
 
     let res = match tool {
         agbridge_handlers::Tool::Antigravity => {
@@ -153,7 +171,6 @@ async fn dispatch(
             stub_to_response(r)?
         }
     };
-    let _ = headers_clone; // keep for future passthrough
     Ok(res)
 }
 
@@ -216,7 +233,7 @@ fn is_hop_by_hop(name: &str) -> bool {
     )
 }
 
-type BoxedBody = http_body_util::combinators::UnsyncBoxBody<Bytes, anyhow::Error>;
+pub type BoxedBody = http_body_util::combinators::UnsyncBoxBody<Bytes, anyhow::Error>;
 
 fn io_to_anyhow(e: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{e}")

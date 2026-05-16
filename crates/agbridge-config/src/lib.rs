@@ -28,7 +28,7 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {
     #[serde(default)]
     pub antigravity: ToolConfig,
@@ -36,8 +36,19 @@ pub struct ToolsConfig {
     pub copilot: ToolConfig,
     #[serde(default)]
     pub kiro: ToolConfig,
-    #[serde(default)]
+    #[serde(default = "ToolConfig::disabled")]
     pub cursor: ToolConfig,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            antigravity: ToolConfig::default(),
+            copilot: ToolConfig::default(),
+            kiro: ToolConfig::default(),
+            cursor: ToolConfig::disabled(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +58,12 @@ pub struct ToolConfig {
     /// Mapping from the model alias the IDE sends to the upstream model name.
     #[serde(default)]
     pub model_map: HashMap<String, String>,
+}
+
+impl ToolConfig {
+    pub fn disabled() -> Self {
+        Self { enabled: false, model_map: HashMap::new() }
+    }
 }
 
 impl Default for ToolConfig {
