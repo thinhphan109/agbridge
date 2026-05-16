@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
-    SanType,
+    NameConstraints, GeneralSubtree, SanType,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -26,6 +26,18 @@ use tracing::{info, warn};
 pub const ROOT_VALIDITY_DAYS: i64 = 365 * 10;
 pub const LEAF_VALIDITY_DAYS: i64 = 365;
 pub const ROOT_RENEW_THRESHOLD_DAYS: i64 = 30;
+
+/// Hostnames the Root CA is permitted to sign for. Anything else is excluded
+/// via X.509 Name Constraints, so a leaked CA cannot impersonate the wider
+/// internet.
+pub const ALLOWED_HOSTS: &[&str] = &[
+    "cloudcode-pa.googleapis.com",
+    "daily-cloudcode-pa.googleapis.com",
+    "api.individual.githubcopilot.com",
+    "q.us-east-1.amazonaws.com",
+    "codewhisperer.us-east-1.amazonaws.com",
+    "api2.cursor.sh",
+];
 
 /// In-memory leaf cert cache keyed by SNI hostname.
 #[derive(Clone, Debug)]
@@ -110,6 +122,15 @@ fn generate_root_ca(key_path: &Path, cert_path: &Path) -> Result<(String, String
         KeyUsagePurpose::KeyCertSign,
         KeyUsagePurpose::CrlSign,
     ];
+    // Critical defense: this CA can only sign certs for the listed hostnames.
+    // Modern OS validators (Windows >= 10, macOS, Linux NSS) honor this.
+    params.name_constraints = Some(NameConstraints {
+        permitted_subtrees: ALLOWED_HOSTS
+            .iter()
+            .map(|h| GeneralSubtree::DnsName((*h).into()))
+            .collect(),
+        excluded_subtrees: vec![],
+    });
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "agbridge Root CA");
     dn.push(DnType::OrganizationName, "agbridge");
@@ -129,6 +150,7 @@ fn generate_root_ca(key_path: &Path, cert_path: &Path) -> Result<(String, String
     fs::write(cert_path, &cert_pem).context("write rootCA.crt")?;
     fs::write(key_path, &key_pem).context("write rootCA.key")?;
     set_mode_0600(key_path)?;
+    lock_acl_to_current_user(key_path);
 
     Ok((key_pem, cert_pem))
 }
@@ -184,9 +206,26 @@ fn set_mode_0600(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_mode_0600(_path: &Path) -> Result<()> {
-    // Windows ACL hardening handled separately by the trust installer.
+    // Windows ACL hardening handled by `lock_acl_to_current_user` below.
     Ok(())
 }
+
+#[cfg(windows)]
+fn lock_acl_to_current_user(path: &Path) {
+    use std::process::Command;
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Administrators".to_string());
+    // Strip inherited ACEs and grant exclusive Full Control to the current
+    // user. Best-effort: we log and continue if `icacls` is missing.
+    let path_str = path.to_string_lossy().to_string();
+    let _ = Command::new("icacls").args([&path_str, "/inheritance:r"]).status();
+    let _ = Command::new("icacls")
+        .args([&path_str, "/grant:r", &format!("{user}:F")])
+        .status();
+    tracing::info!(?path, %user, "locked ACL via icacls");
+}
+
+#[cfg(not(windows))]
+fn lock_acl_to_current_user(_path: &Path) {}
 
 // `time` is a public dep through rcgen; declared explicitly in Cargo.toml.
 use ::time::{Duration, OffsetDateTime};

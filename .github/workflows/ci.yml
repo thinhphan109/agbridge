@@ -48,6 +48,7 @@ jobs:
         with:
           name: agbridge-windows-x64
           path: agbridge/target/release/agbridge.exe
+          retention-days: 7
 
   audit:
     name: cargo audit

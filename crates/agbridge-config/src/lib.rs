@@ -154,6 +154,7 @@ impl Config {
         let toml = toml::to_string_pretty(self)?;
         fs::write(path, toml).with_context(|| format!("write {}", path.display()))?;
         set_mode_0600(path)?;
+        lock_acl_to_current_user(path);
         Ok(())
     }
 }
@@ -169,6 +170,18 @@ fn set_mode_0600(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_mode_0600(_path: &Path) -> Result<()> { Ok(()) }
+
+#[cfg(windows)]
+fn lock_acl_to_current_user(path: &Path) {
+    use std::process::Command;
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "Administrators".to_string());
+    let p = path.to_string_lossy().to_string();
+    let _ = Command::new("icacls").args([&p, "/inheritance:r"]).status();
+    let _ = Command::new("icacls").args([&p, "/grant:r", &format!("{user}:F")]).status();
+}
+
+#[cfg(not(windows))]
+fn lock_acl_to_current_user(_path: &Path) {}
 
 impl Default for Config {
     fn default() -> Self {

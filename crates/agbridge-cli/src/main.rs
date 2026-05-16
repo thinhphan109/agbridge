@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "agbridge", version, about = "Local MITM bridge for 9router")]
@@ -77,8 +76,7 @@ enum ServiceCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let filter = EnvFilter::try_new(&cli.log).unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    agbridge_logging::init(&cli.log);
 
     let config_path = cli.config.unwrap_or_else(|| Config::default_path().expect("config path"));
 
