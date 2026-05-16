@@ -318,6 +318,8 @@ async fn doctor(config_path: &std::path::Path) -> Result<()> {
     println!("• listen_addr: {}", config.listen_addr);
     println!("• cert_installed: {}", agbridge_trust::is_installed());
     println!("• loopback bind: {}", ensure_loopback(&config.listen_addr).is_ok());
+    println!("• cursor_enabled: {}", config.tools.cursor.enabled);
+
     let resp = reqwest::Client::new()
         .get(format!("{}/api/health", config.router_url.trim_end_matches('/')))
         .send()
@@ -326,8 +328,47 @@ async fn doctor(config_path: &std::path::Path) -> Result<()> {
         Ok(r) => println!("• upstream reachable: {} ({})", r.status(), r.url()),
         Err(e) => println!("• upstream reachable: FAIL ({e})"),
     }
+
+    println!("• per-host TLS handshake (real upstream, via Cloudflare DNS):");
+    for host in [
+        "cloudcode-pa.googleapis.com",
+        "api.individual.githubcopilot.com",
+        "q.us-east-1.amazonaws.com",
+        "api2.cursor.sh",
+    ] {
+        match probe_real_upstream(host).await {
+            Ok(status) => println!("    {host:50} OK ({status})"),
+            Err(e) => println!("    {host:50} FAIL: {e}"),
+        }
+    }
     Ok(())
 }
+
+/// Performs a HEAD request to the **real** upstream (DNS resolved via the
+/// hosts file *bypass*). Detects: (1) network unreachable, (2) cert pinning
+/// rejection, (3) hosts hijack reaching ourselves and self-signed cert
+/// failing default trust.
+async fn probe_real_upstream(host: &str) -> Result<u16> {
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use hickory_resolver::TokioAsyncResolver;
+    use std::net::SocketAddr;
+
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::cloudflare(), ResolverOpts::default());
+    let lookup = resolver.lookup_ip(host).await
+        .with_context(|| format!("public DNS for {host}"))?;
+    let ip = lookup.iter().next().ok_or_else(|| anyhow::anyhow!("no IP"))?;
+
+    let client = reqwest::Client::builder()
+        .resolve(host, SocketAddr::new(ip, 443))
+        .connect_timeout(std::time::Duration::from_secs(6))
+        .build()?;
+    let resp = client
+        .head(format!("https://{host}/"))
+        .send()
+        .await?;
+    Ok(resp.status().as_u16())
+}
+
 
 fn show_config(config_path: &std::path::Path) -> Result<()> {
     let config = load_or_init(config_path)?;

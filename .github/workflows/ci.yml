@@ -51,14 +51,19 @@ jobs:
           retention-days: 7
 
   audit:
-    name: cargo audit
+    name: cargo audit + deny
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
-      - name: Audit
+      - name: Install tooling
+        run: |
+          cargo install --locked cargo-audit
+          cargo install --locked cargo-deny
+      - name: cargo audit
         working-directory: agbridge
-        run: cargo audit --deny warnings || true # advisories only, do not fail CI yet
+        run: cargo audit --deny warnings || true
+      - name: cargo deny
+        working-directory: agbridge
+        run: cargo deny check bans licenses sources advisories
