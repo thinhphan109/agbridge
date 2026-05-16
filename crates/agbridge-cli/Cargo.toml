@@ -33,3 +33,7 @@ tracing-subscriber.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
 hickory-resolver.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots = "0.26"
+rustls-native-certs = "0.7"

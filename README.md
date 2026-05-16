@@ -7,7 +7,7 @@ Local Windows-first TLS bridge that lets IDE plugins talk to your self-hosted [9
 > [!WARNING]
 > Beta. P0 security tier is closed and the dispatcher is wired into the Windows Service Manager, but per-IDE handlers still need extended fuzz/replay testing against your live router. Pin the version you build and audit the diff before sharing the binary.
 
-## How it works
+    ## How it works
 
 ```mermaid
 flowchart LR

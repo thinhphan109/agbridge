@@ -77,6 +77,12 @@ enum ServiceCmd {
 }
 
 fn main() -> Result<()> {
+    // Install rustls' default crypto provider exactly once. Both the proxy
+    // server and the doctor probe rely on a global provider being present.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("install rustls crypto provider"))?;
+
     let cli = Cli::parse();
     agbridge_logging::init(&cli.log);
 
@@ -337,37 +343,77 @@ async fn doctor(config_path: &std::path::Path) -> Result<()> {
         "api2.cursor.sh",
     ] {
         match probe_real_upstream(host).await {
-            Ok(status) => println!("    {host:50} OK ({status})"),
+            Ok(detail) => println!("    {host:50} {detail}"),
             Err(e) => println!("    {host:50} FAIL: {e}"),
         }
     }
     Ok(())
 }
 
-/// Performs a HEAD request to the **real** upstream (DNS resolved via the
-/// hosts file *bypass*). Detects: (1) network unreachable, (2) cert pinning
-/// rejection, (3) hosts hijack reaching ourselves and self-signed cert
-/// failing default trust.
-async fn probe_real_upstream(host: &str) -> Result<u16> {
+/// Performs a real TLS handshake to the upstream (DNS resolved via the public
+/// resolver, NOT the hosts file). Detects: (1) network unreachable, (2) cert
+/// rejection from the public PKI (so handler-side pinning regressions are
+/// caught), (3) hosts hijack misroute that still returns the agbridge cert.
+async fn probe_real_upstream(host: &str) -> Result<String> {
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
     use hickory_resolver::TokioAsyncResolver;
-    use std::net::SocketAddr;
+    use tokio::net::TcpStream;
+    use tokio::time::{timeout, Duration};
 
-    let resolver = TokioAsyncResolver::tokio(ResolverConfig::cloudflare(), ResolverOpts::default());
-    let lookup = resolver.lookup_ip(host).await
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::cloudflare(), {
+        let mut opts = ResolverOpts::default();
+        opts.use_hosts_file = false;
+        opts
+    });
+    let lookup = timeout(Duration::from_secs(5), resolver.lookup_ip(host))
+        .await
+        .map_err(|_| anyhow::anyhow!("DNS timeout"))?
         .with_context(|| format!("public DNS for {host}"))?;
     let ip = lookup.iter().next().ok_or_else(|| anyhow::anyhow!("no IP"))?;
 
-    let client = reqwest::Client::builder()
-        .resolve(host, SocketAddr::new(ip, 443))
-        .connect_timeout(std::time::Duration::from_secs(6))
-        .build()?;
-    let resp = client
-        .head(format!("https://{host}/"))
-        .send()
-        .await?;
-    Ok(resp.status().as_u16())
+    let tcp = timeout(
+        Duration::from_secs(5),
+        TcpStream::connect((ip, 443u16)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TCP timeout"))?
+    .context("TCP connect")?;
+
+    let connector = tokio_native_handshake();
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| anyhow::anyhow!("bad server name: {e}"))?;
+    let tls = timeout(
+        Duration::from_secs(5),
+        connector.connect(server_name, tcp),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TLS timeout"))?
+    .map_err(|e| anyhow::anyhow!("handshake: {e}"))?;
+    drop(tls);
+    Ok(format!("TLS OK (resolved {ip})"))
 }
+
+fn tokio_native_handshake() -> tokio_rustls::TlsConnector {
+    use rustls::{ClientConfig, RootCertStore};
+    let mut roots = RootCertStore::empty();
+    // Use the OS trust store so the doctor probe matches what the IDE
+    // actually trusts (and so we surface the agbridge Root CA properly).
+    match rustls_native_certs::load_native_certs() {
+        Ok(certs) => {
+            for c in certs {
+                let _ = roots.add(c);
+            }
+        }
+        Err(_) => {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+}
+
 
 
 fn show_config(config_path: &std::path::Path) -> Result<()> {
