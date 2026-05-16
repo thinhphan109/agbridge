@@ -9,6 +9,7 @@ members = [
     "crates/agbridge-config",
     "crates/agbridge-handlers",
     "crates/agbridge-eventstream",
+    "crates/agbridge-service",
 ]
 
 [workspace.package]

@@ -2,6 +2,7 @@ use agbridge_cert::CertManager;
 use agbridge_config::{ensure_loopback, Config};
 use agbridge_core::Server;
 use agbridge_dns::{flush_dns_cache, HostsEditor, Tool};
+use agbridge_service::{default_pid_path, kill_pid, read_pid, remove_pid, service, write_pid};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -28,8 +29,8 @@ enum Cmd {
     /// Run cert+hosts setup, then start the proxy.
     Start {
         #[arg(long)] skip_setup: bool,
-        /// Allow binding to a non-loopback address. **Dangerous** — exposes the
-        /// proxy on your LAN with full upstream credentials.
+        /// Allow binding to a non-loopback address. **Dangerous** — exposes
+        /// the proxy on your LAN with full upstream credentials.
         #[arg(long)] allow_remote: bool,
     },
     /// Stop a previously started agbridge instance (PID file based).
@@ -39,8 +40,7 @@ enum Cmd {
     /// Remove agbridge hosts entries (default) or do a full uninstall.
     Cleanup {
         /// Hard-kill switch: remove hosts, uninstall Root CA, securely delete
-        /// the CA private key, and flush DNS. Use this if you suspect any kind
-        /// of compromise.
+        /// the CA private key, and flush DNS.
         #[arg(long)] hard: bool,
     },
     /// Print runtime status as JSON.
@@ -53,6 +53,25 @@ enum Cmd {
     ConfigSet { kv: Vec<String> },
     /// Remove the Root CA from the OS trust store.
     UninstallCert,
+    /// Manage the agbridge Windows Service (Windows only).
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Install agbridge as an auto-start Windows Service.
+    Install,
+    /// Remove the Windows Service entry.
+    Uninstall,
+    /// Start the installed service.
+    Start,
+    /// Stop the installed service.
+    Stop,
+    /// Print current service state.
+    Status,
 }
 
 #[tokio::main]
@@ -65,7 +84,7 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Start { skip_setup, allow_remote } => start(&config_path, skip_setup, allow_remote).await,
-        Cmd::Stop => stop(),
+        Cmd::Stop => stop(&config_path),
         Cmd::Setup => setup(&config_path),
         Cmd::Cleanup { hard } => cleanup(&config_path, hard),
         Cmd::Status => status(&config_path).await,
@@ -73,6 +92,7 @@ async fn main() -> Result<()> {
         Cmd::ConfigShow => show_config(&config_path),
         Cmd::ConfigSet { kv } => set_config(&config_path, kv),
         Cmd::UninstallCert => { agbridge_trust::uninstall()?; Ok(()) }
+        Cmd::Service { action } => run_service(action),
     }
 }
 
@@ -86,14 +106,89 @@ async fn start(config_path: &std::path::Path, skip_setup: bool, allow_remote: bo
         warn!(addr = %config.listen_addr, "non-loopback bind enabled by --allow-remote");
     }
     if !skip_setup { setup(config_path)?; }
-    let cert = CertManager::init(&config.resolved_data_dir()?)?;
+
+    let data_dir = config.resolved_data_dir()?;
+    let pid_path = default_pid_path(&data_dir);
+    if let Ok(prev) = read_pid(&pid_path) {
+        warn!(prev_pid = prev, "stale pid file detected; replacing");
+    }
+    write_pid(&pid_path)?;
+
+    let cert = CertManager::init(&data_dir)?;
     let server = Server::new(config, cert)?;
-    server.run().await
+
+    let server_fut = tokio::spawn(async move { server.run().await });
+    let shutdown = wait_for_shutdown();
+    let result = tokio::select! {
+        r = server_fut => r.unwrap_or_else(|e| Err(anyhow::anyhow!("join error: {e}"))),
+        _ = shutdown => {
+            info!("shutdown signal received");
+            Ok(())
+        }
+    };
+
+    info!("removing hosts entries before exit");
+    let _ = HostsEditor::system().cleanup_all();
+    flush_dns_cache();
+    remove_pid(&pid_path);
+    result
 }
 
-fn stop() -> Result<()> {
-    warn!("`stop` not implemented yet — kill the process or use Ctrl+C");
+#[cfg(windows)]
+async fn wait_for_shutdown() {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
+    let mut c = ctrl_c().expect("ctrl_c");
+    let mut b = ctrl_break().expect("ctrl_break");
+    let mut x = ctrl_close().expect("ctrl_close");
+    tokio::select! {
+        _ = c.recv() => {},
+        _ = b.recv() => {},
+        _ = x.recv() => {},
+    }
+}
+
+#[cfg(not(windows))]
+async fn wait_for_shutdown() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("sigterm");
+    let mut int_ = signal(SignalKind::interrupt()).expect("sigint");
+    tokio::select! {
+        _ = term.recv() => {},
+        _ = int_.recv() => {},
+    }
+}
+
+fn stop(config_path: &std::path::Path) -> Result<()> {
+    let cfg = load_or_init(config_path)?;
+    let pid_path = default_pid_path(&cfg.resolved_data_dir()?);
+    if !pid_path.exists() {
+        warn!("no PID file at {} — nothing to stop", pid_path.display());
+        return Ok(());
+    }
+    let pid = read_pid(&pid_path)?;
+    info!(%pid, "sending kill");
+    kill_pid(pid)?;
+    remove_pid(&pid_path);
+    let _ = HostsEditor::system().cleanup_all();
+    flush_dns_cache();
     Ok(())
+}
+
+fn run_service(action: ServiceCmd) -> Result<()> {
+    match action {
+        ServiceCmd::Install => {
+            let exe = std::env::current_exe().context("current_exe")?;
+            service::install(&exe, &["start", "--skip-setup"])
+        }
+        ServiceCmd::Uninstall => service::uninstall(),
+        ServiceCmd::Start => service::start(),
+        ServiceCmd::Stop => service::stop(),
+        ServiceCmd::Status => {
+            let s = service::status()?;
+            println!("{s}");
+            Ok(())
+        }
+    }
 }
 
 fn setup(config_path: &std::path::Path) -> Result<()> {

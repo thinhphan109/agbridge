@@ -15,6 +15,7 @@ agbridge-config   = { path = "../agbridge-config" }
 agbridge-core     = { path = "../agbridge-core" }
 agbridge-dns      = { path = "../agbridge-dns" }
 agbridge-handlers = { path = "../agbridge-handlers" }
+agbridge-service  = { path = "../agbridge-service" }
 agbridge-trust    = { path = "../agbridge-trust" }
 
 tokio.workspace = true
