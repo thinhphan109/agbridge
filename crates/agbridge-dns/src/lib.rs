@@ -126,18 +126,26 @@ impl HostsEditor {
             .path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("hosts file has no parent dir"))?;
-        let new = dir.join("hosts.agbridge.new");
+        // Unique sibling names so concurrent invocations do not race.
+        let unique = format!(
+            "{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let new = dir.join(format!("hosts.agbridge.{unique}.new"));
         fs::write(&new, content).with_context(|| format!("write {}", new.display()))?;
         // On Windows we cannot atomically rename if the target exists, so we
         // back the original up first; on Unix `rename` is atomic.
         if cfg!(target_os = "windows") {
-            let bak = dir.join("hosts.agbridge.bak");
+            let bak = dir.join(format!("hosts.agbridge.{unique}.bak"));
             let _ = fs::remove_file(&bak);
             if self.path.exists() {
                 fs::rename(&self.path, &bak).with_context(|| "backup current hosts")?;
             }
             if let Err(e) = fs::rename(&new, &self.path) {
-                // rollback
                 if bak.exists() {
                     let _ = fs::rename(&bak, &self.path);
                 }

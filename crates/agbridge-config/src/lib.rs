@@ -59,7 +59,23 @@ impl Default for ToolConfig {
 }
 
 fn default_true() -> bool { true }
-fn default_listen() -> String { "0.0.0.0:443".to_string() }
+fn default_listen() -> String { "127.0.0.1:443".to_string() }
+
+/// Returns Ok(()) if `addr` is a loopback address, Err otherwise. Used by the
+/// CLI to refuse a non-loopback bind unless the user passed `--allow-remote`.
+pub fn ensure_loopback(addr: &str) -> Result<()> {
+    use std::net::{IpAddr, SocketAddr};
+    let socket: SocketAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid listen_addr `{addr}`: {e}"))?;
+    match socket.ip() {
+        IpAddr::V4(ip) if ip.is_loopback() => Ok(()),
+        IpAddr::V6(ip) if ip.is_loopback() => Ok(()),
+        other => anyhow::bail!(
+            "refusing to bind to non-loopback address {other}; pass --allow-remote to override"
+        ),
+    }
+}
 
 /// Wrapper around a string that never gets printed in Debug/Display.
 #[derive(Clone, Default, Serialize, Deserialize)]

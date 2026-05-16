@@ -1,5 +1,5 @@
 use agbridge_cert::CertManager;
-use agbridge_config::Config;
+use agbridge_config::{ensure_loopback, Config};
 use agbridge_core::Server;
 use agbridge_dns::{flush_dns_cache, HostsEditor, Tool};
 use anyhow::{Context, Result};
@@ -28,13 +28,21 @@ enum Cmd {
     /// Run cert+hosts setup, then start the proxy.
     Start {
         #[arg(long)] skip_setup: bool,
+        /// Allow binding to a non-loopback address. **Dangerous** — exposes the
+        /// proxy on your LAN with full upstream credentials.
+        #[arg(long)] allow_remote: bool,
     },
-    /// Stop a previously started agbridge instance.
+    /// Stop a previously started agbridge instance (PID file based).
     Stop,
     /// Generate Root CA, install into trust store, write hosts entries.
     Setup,
-    /// Remove all agbridge hosts entries.
-    Cleanup,
+    /// Remove agbridge hosts entries (default) or do a full uninstall.
+    Cleanup {
+        /// Hard-kill switch: remove hosts, uninstall Root CA, securely delete
+        /// the CA private key, and flush DNS. Use this if you suspect any kind
+        /// of compromise.
+        #[arg(long)] hard: bool,
+    },
     /// Print runtime status as JSON.
     Status,
     /// Run diagnostics.
@@ -56,10 +64,10 @@ async fn main() -> Result<()> {
     let config_path = cli.config.unwrap_or_else(|| Config::default_path().expect("config path"));
 
     match cli.cmd {
-        Cmd::Start { skip_setup } => start(&config_path, skip_setup).await,
+        Cmd::Start { skip_setup, allow_remote } => start(&config_path, skip_setup, allow_remote).await,
         Cmd::Stop => stop(),
         Cmd::Setup => setup(&config_path),
-        Cmd::Cleanup => cleanup(),
+        Cmd::Cleanup { hard } => cleanup(&config_path, hard),
         Cmd::Status => status(&config_path).await,
         Cmd::Doctor => doctor(&config_path).await,
         Cmd::ConfigShow => show_config(&config_path),
@@ -68,8 +76,15 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn start(config_path: &std::path::Path, skip_setup: bool) -> Result<()> {
+async fn start(config_path: &std::path::Path, skip_setup: bool, allow_remote: bool) -> Result<()> {
     let config = load_or_init(config_path)?;
+    if !allow_remote {
+        ensure_loopback(&config.listen_addr).context(
+            "listener bound to a non-loopback address; pass --allow-remote to acknowledge",
+        )?;
+    } else {
+        warn!(addr = %config.listen_addr, "non-loopback bind enabled by --allow-remote");
+    }
     if !skip_setup { setup(config_path)?; }
     let cert = CertManager::init(&config.resolved_data_dir()?)?;
     let server = Server::new(config, cert)?;
@@ -96,10 +111,52 @@ fn setup(config_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn cleanup() -> Result<()> {
+fn cleanup(config_path: &std::path::Path, hard: bool) -> Result<()> {
     HostsEditor::system().cleanup_all()?;
     flush_dns_cache();
+    if !hard {
+        return Ok(());
+    }
+    warn!("--hard: tearing down Root CA, private key, and trust store entries");
+    let _ = agbridge_trust::uninstall();
+    if let Ok(cfg) = load_or_init(config_path) {
+        if let Ok(data_dir) = cfg.resolved_data_dir() {
+            let key = data_dir.join("cert").join("rootCA.key");
+            let crt = data_dir.join("cert").join("rootCA.crt");
+            secure_remove(&key);
+            secure_remove(&crt);
+        }
+    }
     Ok(())
+}
+
+/// Best-effort secure file removal: overwrite with zeros (1 pass) then unlink.
+fn secure_remove(path: &std::path::Path) {
+    use std::fs::{remove_file, OpenOptions};
+    use std::io::{Seek, Write};
+    if !path.exists() { return; }
+    let res = (|| -> Result<()> {
+        let mut f = OpenOptions::new().write(true).open(path)?;
+        let len = f.metadata()?.len() as usize;
+        f.seek(std::io::SeekFrom::Start(0))?;
+        let buf = vec![0u8; 4096.min(len.max(1))];
+        let mut written = 0usize;
+        while written < len {
+            let n = (len - written).min(buf.len());
+            f.write_all(&buf[..n])?;
+            written += n;
+        }
+        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        remove_file(path)?;
+        Ok(())
+    })();
+    if let Err(e) = res {
+        warn!(?path, "secure_remove failed: {e}");
+    } else {
+        info!(?path, "shredded");
+    }
 }
 
 async fn status(config_path: &std::path::Path) -> Result<()> {
@@ -128,6 +185,7 @@ async fn doctor(config_path: &std::path::Path) -> Result<()> {
     println!("• router_url: {}", config.router_url);
     println!("• listen_addr: {}", config.listen_addr);
     println!("• cert_installed: {}", agbridge_trust::is_installed());
+    println!("• loopback bind: {}", ensure_loopback(&config.listen_addr).is_ok());
     let resp = reqwest::Client::new()
         .get(format!("{}/api/health", config.router_url.trim_end_matches('/')))
         .send()
