@@ -9,6 +9,9 @@ description = "Command-line entry point for agbridge"
 name = "agbridge"
 path = "src/main.rs"
 
+[package.metadata.wix]
+include = ["../../wix/main.wxs"]
+
 [dependencies]
 agbridge-cert     = { path = "../agbridge-cert" }
 agbridge-config   = { path = "../agbridge-config" }

@@ -1,0 +1,99 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  agbridge MSI definition.
+  Built with cargo-wix. Installs agbridge.exe into Program Files\agbridge,
+  adds it to PATH, and registers an uninstall entry in Add/Remove Programs.
+  Service install is optional and performed via `agbridge service install`
+  after the user runs `agbridge setup` (which needs Admin anyway).
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+    <Product
+        Id='*'
+        Name='agbridge'
+        UpgradeCode='8B7B0A8E-2E6F-4B27-B5F0-3F44F9A41E11'
+        Manufacturer='agbridge'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Manufacturer='agbridge'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of agbridge is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='agbridge Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='agbridge'>
+                    <Component Id='Path' Guid='F8F7C5D1-2E27-4B6D-A0E0-4F83B6E8E5D2' KeyPath='yes'>
+                        <Environment
+                            Id='PATH'
+                            Name='PATH'
+                            Value='[APPLICATIONFOLDER]'
+                            Permanent='no'
+                            Part='last'
+                            Action='set'
+                            System='yes'/>
+                    </Component>
+                    <Component Id='binary' Guid='C2A1AA9B-9C4F-4F34-A5A3-3F4D2A4B7D2A'>
+                        <File
+                            Id='exe0'
+                            Name='agbridge.exe'
+                            DiskId='1'
+                            Source='target\release\agbridge.exe'
+                            KeyPath='yes'/>
+                    </Component>
+                    <Component Id='license' Guid='AC3FB4F4-1F44-44A2-9D45-4D11C5E25C7D'>
+                        <File
+                            Id='LicenseFile'
+                            Name='LICENSE.rtf'
+                            DiskId='1'
+                            Source='wix\License.rtf'
+                            KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <Feature
+            Id='Binaries'
+            Title='Application'
+            Description='Installs the agbridge executable and adds it to PATH.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary'/>
+            <ComponentRef Id='license'/>
+            <Feature
+                Id='Environment'
+                Title='PATH Environment Variable'
+                Description='Adds the install directory to the system PATH.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='Path'/>
+            </Feature>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+
+        <Property Id='ARPHELPLINK' Value='https://github.com/thinhphan109/agbridge'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+        </UI>
+
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
+    </Product>
+</Wix>

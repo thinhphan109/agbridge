@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: build + test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agbridge
+
+      - name: cargo check
+        working-directory: agbridge
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        working-directory: agbridge
+        run: cargo test --workspace --lib
+
+      - name: cargo build --release
+        working-directory: agbridge
+        run: cargo build --release --bin agbridge
+
+      - name: Smoke --version
+        working-directory: agbridge
+        run: ./target/release/agbridge.exe --version
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agbridge-windows-x64
+          path: agbridge/target/release/agbridge.exe
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit
+        working-directory: agbridge
+        run: cargo audit --deny warnings || true # advisories only, do not fail CI yet
