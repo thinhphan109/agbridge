@@ -1,0 +1,13 @@
+# Default to LF in the index; let git auto-translate on Windows checkout.
+* text=auto eol=lf
+
+# Generated lockfiles: stable LF only.
+Cargo.lock text eol=lf
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.ico binary
+*.msi binary
+*.exe binary
+*.zip binary
